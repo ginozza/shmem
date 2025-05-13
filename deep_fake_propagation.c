@@ -1,50 +1,16 @@
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ipc.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <sys/shm.h>
+#include <sys/types.h>
 #include <sys/wait.h>
-#include <semaphore.h>
+#include <unistd.h>
 
 #define N_NEIGHBORS 8
 void error(const char *err) {
   perror(err);
   exit(EXIT_FAILURE);
-}
-
-int value(int **matrix, int x, int y, int rows, int cols) {
-  int dx[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-  int dy[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-
-  int counter1 = 0;
-  int counter2 = 0;
-
-  for (int i = 0; i < N_NEIGHBORS; ++i) {
-    int nx = x + dx[i];
-    int ny = y + dy[i];
-
-    if (nx >= 0 && ny >= 0 && nx < rows && ny < cols) {
-      if (matrix[nx][ny] == 1)
-        counter1++;
-      else if (matrix[nx][ny] == 2)
-        counter2++;
-    }
-  }
-
-  int current_value = matrix[x][y];
-  int new_value = 0;
-  if (counter1 + counter2 >= 2 && current_value == 0)
-    new_value = 1;
-  if (current_value == 2)
-    new_value = 2;
-  if (current_value == 1){
-    double P = 0.15 + (counter2 * 0.05);
-    double r = (double)rand() / RAND_MAX;
-    new_value = (P > r) ? 2 : 1;
-  }
-
-  return new_value;
 }
 
 int **read_file(const char *filename, int *rows, int *cols) {
@@ -68,13 +34,52 @@ int **read_file(const char *filename, int *rows, int *cols) {
   return matrix;
 }
 
-int main(int argc, char *argv[]) {
-  if (argc < 4)
-    error("invalid parameters: <n_childs> <shifts> <file>");
+int value_0_to_1(int **matrix, int x, int y, int rows, int cols) {
+  int dx[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+  int dy[] = {-1, 0, 1, -1, 1, -1, 0, 1};
 
-  int n_childs = atoi(argv[1]);
-  int shifts = atoi(argv[2]);
-  const char *filename = argv[3];
+  int count = 0;
+  for (int i = 0; i < N_NEIGHBORS; ++i) {
+    int nx = x + dx[i];
+    int ny = y + dy[i];
+    if (nx >= 0 && ny >= 0 && nx < rows && ny < cols && matrix[nx][ny] > 0)
+      count++;
+  }
+
+  if (matrix[x][y] == 0 && count >= 2)
+    return 1;
+  return matrix[x][y];
+}
+
+int value_1_to_2(int **matrix, int x, int y, int rows, int cols) {
+  if (matrix[x][y] != 1)
+    return matrix[x][y];
+
+  int dx[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+  int dy[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+  int counter2 = 0;
+
+  for (int i = 0; i < N_NEIGHBORS; ++i) {
+    int nx = x + dx[i];
+    int ny = y + dy[i];
+    if (nx >= 0 && ny >= 0 && nx < rows && ny < cols) {
+      if (matrix[nx][ny] == 2)
+        counter2++;
+    }
+  }
+
+  double P = 0.15 + (counter2 * 0.05);
+  double r = (double)rand() / RAND_MAX;
+  return (P > r) ? 2 : 1;
+}
+
+int main(int argc, char *argv[]) {
+  if (argc < 3)
+    error("invalid parameters: <shifts> <file>");
+
+  int n_childs = 2;
+  int shifts = atoi(argv[1]);
+  const char *filename = argv[2];
 
   int rows, cols;
   int **temp_matrix = read_file(filename, &rows, &cols);
@@ -97,36 +102,40 @@ int main(int argc, char *argv[]) {
     for (int j = 0; j < cols; ++j)
       mat_r[i][j] = temp_matrix[i][j];
 
-  for (int i = 0; i < rows; ++i) 
+  for (int i = 0; i < rows; ++i)
     free(temp_matrix[i]);
   free(temp_matrix);
 
-  int shm_id_sem = shmget(IPC_PRIVATE, sizeof(sem_t) * n_childs * 2, 0666 | IPC_CREAT);
+  int shm_id_sem =
+      shmget(IPC_PRIVATE, sizeof(sem_t) * n_childs * 2, 0666 | IPC_CREAT);
   sem_t *sems = shmat(shm_id_sem, NULL, 0);
 
   for (int i = 0; i < n_childs; ++i) {
-    sem_init(&sems[i * 2], 1, 0); // father_to_child[i]
+    sem_init(&sems[i * 2], 1, 0);     // father_to_child[i]
     sem_init(&sems[i * 2 + 1], 1, 0); // child_to_father[i]
   }
 
   int chunk = rows / n_childs;
 
-  for (int i = 0; i < n_childs; ++i) {
+  for (int i = 0; i < 2; ++i) {
     pid_t pid = fork();
-    if(pid == 0) {
-      int child_idx = i;
-      int start = i * chunk;
-      int end = (i == n_childs - 1) ? rows : start + chunk;
-
+    if (pid == 0) {
       for (int t = 0; t < shifts; ++t) {
-        sem_wait(&sems[child_idx * 2]);
-        for (int i = start; i < end; ++i) {
-          for (int j = 0; j < cols; ++j) {
-            mat_w[i][j] = value(mat_r, i, j, rows, cols);
-          }
+        sem_wait(&sems[i * 2]);
+
+        if (i == 0) {
+          for (int x = 0; x < rows; ++x)
+            for (int y = 0; y < cols; ++y)
+              mat_w[x][y] = value_0_to_1(mat_r, x, y, rows, cols);
+        } else {
+          for (int x = 0; x < rows; ++x)
+            for (int y = 0; y < cols; ++y)
+              mat_w[x][y] = value_1_to_2(mat_w, x, y, rows, cols);
         }
-        sem_post(&sems[child_idx * 2 + 1]);
+
+        sem_post(&sems[i * 2 + 1]);
       }
+
       shmdt(mat_r);
       shmdt(mat_w);
       shmdt(sems);
@@ -134,30 +143,28 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  
   for (int t = 0; t < shifts; ++t) {
-    // unblock childs
-    for (int i = 0; i < n_childs; ++i)
-      sem_post(&sems[i * 2]);
+    sem_post(&sems[0 * 2]);
+    sem_wait(&sems[0 * 2 + 1]);
 
-    // block childs for next shift 
-    for (int i = 0; i < n_childs; ++i)
-      sem_wait(&sems[i * 2 + 1]);
+    sem_post(&sems[1 * 2]);
+    sem_wait(&sems[1 * 2 + 1]);
 
     printf("Paso %d:\n", t + 1);
-    for (int i = 0; i < rows; ++i) {
-      for (int j = 0; j < cols; ++j)
-        printf("%3d", mat_r[i][j]);
+    for (int x = 0; x < rows; ++x) {
+      for (int y = 0; y < cols; ++y)
+        printf("%3d", mat_w[x][y]);
       printf("\n");
     }
     printf("\n");
 
-    for (int i = 0; i < rows - 0; ++i)
-      for (int j = 0; j < cols - 0; ++j)
-        mat_r[i][j] = mat_w[i][j];
+    for (int x = 0; x < rows; ++x)
+      for (int y = 0; y < cols; ++y)
+        mat_r[x][y] = mat_w[x][y];
   }
 
-  while (wait(NULL) > 0);
+  while (wait(NULL) > 0)
+    ;
 
   for (int i = 0; i < n_childs + 2; ++i)
     sem_destroy(&sems[i]);
@@ -174,5 +181,5 @@ int main(int argc, char *argv[]) {
   shmdt(sems);
   shmctl(shm_id_sem, IPC_RMID, NULL);
 
-  return 0; 
+  return 0;
 }
