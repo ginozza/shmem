@@ -8,11 +8,6 @@
 
 #define MAX_LINE 256
 
-typedef struct {
-  int *bucket;
-  size_t bucket_size;
-} Bucket;
-
 void error(const char *err) {
   perror(err);
   exit(1);
